@@ -48,7 +48,7 @@ class Uint8ImageWrapper(gym.ObservationWrapper):
 
 def make_env(classifier_path: str, seed: int = 0):
     def _thunk():
-        env = ConvActiveExplorerEnv(classifier_path=classifier_path, confidence_threshold=0.5, seed=seed)
+        env = ConvActiveExplorerEnv(classifier_path=classifier_path, confidence_threshold=0.9, seed=seed)
         # convert observation to uint8 0-255 channels-first image expected by SB3's CNN
         env = Uint8ImageWrapper(env)
         env = Monitor(env)

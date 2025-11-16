@@ -24,9 +24,38 @@ except Exception:
     PPO = None
 
 from conv_active_env import ConvActiveExplorerEnv
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+import torch.nn as nn
+import torch as th
+import gymnasium as gym
 
 
-def load_policy_fallback(saved_path: str, env: ConvActiveExplorerEnv):
+# SmallObsCNN mirrors the extractor used during training so fallback loading works
+class SmallObsCNN(BaseFeaturesExtractor):
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 256):
+        super().__init__(observation_space, features_dim)
+        n_channels = observation_space.shape[0]
+        self.cnn = nn.Sequential(
+            nn.Conv2d(n_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+        with th.no_grad():
+            sample = th.as_tensor(observation_space.sample()[None]).float()
+            cnn_out = self.cnn(sample)
+            n_flatten = int(cnn_out.shape[1] * cnn_out.shape[2] * cnn_out.shape[3])
+        self.linear = nn.Sequential(nn.Flatten(), nn.Linear(n_flatten, features_dim), nn.ReLU())
+
+    def forward(self, observations: th.Tensor) -> th.Tensor:
+        x = self.cnn(observations)
+        return self.linear(x)
+
+policy_kwargs = dict(features_extractor_class=SmallObsCNN, features_extractor_kwargs=dict(features_dim=256))
+
+
+def load_policy_fallback(saved_path: str, env: ConvActiveExplorerEnv, policy_kwargs: dict | None = None):
     if PPO is None:
         raise RuntimeError('stable-baselines3 not available in environment')
     if not zipfile.is_zipfile(saved_path):
@@ -36,7 +65,10 @@ def load_policy_fallback(saved_path: str, env: ConvActiveExplorerEnv):
             raise RuntimeError('policy.pth not found in archive; cannot fallback')
         data = z.read('policy.pth')
     state = torch.load(io.BytesIO(data), map_location='cpu')
-    model = PPO('CnnPolicy', env, verbose=0)
+    if policy_kwargs is None:
+        model = PPO('CnnPolicy', env, verbose=0)
+    else:
+        model = PPO('CnnPolicy', env, verbose=0, policy_kwargs=policy_kwargs)
     try:
         model.policy.load_state_dict(state)
     except Exception:
@@ -47,7 +79,7 @@ def load_policy_fallback(saved_path: str, env: ConvActiveExplorerEnv):
     return model
 
 
-def run_visualization(env: ConvActiveExplorerEnv, policy, episodes: int = 20, render_delay: float = 0.03):
+def run_visualization(env: ConvActiveExplorerEnv, policy, episodes: int = 20, render_delay: float = 0.03, deterministic: bool = True):
     try:
         import cv2
     except Exception as e:
@@ -58,7 +90,7 @@ def run_visualization(env: ConvActiveExplorerEnv, policy, episodes: int = 20, re
         terminated = False
         truncated = False
         while not (terminated or truncated):
-            action, _ = policy.predict(obs, deterministic=True)
+            action, _ = policy.predict(obs, deterministic=deterministic)
             obs, rew, terminated, truncated, info = env.step(int(action))
             env.render(mode='cv2')
             # small delay so humans can see frames
@@ -74,7 +106,9 @@ def main():
     parser.add_argument('--saved-path', type=str, required=True)
     parser.add_argument('--classifier', type=str, default='../active_explorer_mnist/mnist_cnn.pth')
     parser.add_argument('--episodes', type=int, default=20)
-    parser.add_argument('--threshold', type=float, default=0.5)
+    parser.add_argument('--mode', type=str, choices=['deterministic', 'stochastic'], default='deterministic',
+                        help='Run visualization deterministically or stochastically')
+    parser.add_argument('--threshold', type=float, default=0.9)
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
 
@@ -92,12 +126,14 @@ def main():
             policy = PPO.load(args.saved_path)
         except Exception as e:
             print('PPO.load failed, using fallback loader:', type(e).__name__, e)
-            policy = load_policy_fallback(args.saved_path, env)
+            # ensure fallback instantiates matching architecture
+            policy = load_policy_fallback(args.saved_path, env, policy_kwargs=policy_kwargs)
     else:
         # fallback requires stable-baselines3; inform user
         raise RuntimeError('stable-baselines3 is not available in this environment')
 
-    run_visualization(env, policy, episodes=args.episodes)
+    deterministic_flag = True if args.mode == 'deterministic' else False
+    run_visualization(env, policy, episodes=args.episodes, deterministic=deterministic_flag)
 
 
 if __name__ == '__main__':
