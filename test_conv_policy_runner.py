@@ -115,6 +115,23 @@ def _allowed_actions_from_conv_obs(env: ConvActiveExplorerEnv, obs: np.ndarray):
     return [int(a) for (a, _, _) in neighbors]
 
 
+class RandomPolicyConv:
+    def __init__(self, action_space):
+        self.action_space = action_space
+
+    def predict(self, obs, deterministic: bool = True):
+        return int(np.random.choice(self.action_space.n)), None
+
+
+class FloodPolicyConv:
+    def __init__(self, env: ConvActiveExplorerEnv):
+        self.env = env
+
+    def predict(self, obs, deterministic: bool = True):
+        allowed = _allowed_actions_from_conv_obs(self.env, obs)
+        return int(np.random.choice(allowed)), None
+
+
 def _get_action_probs_from_sb3(policy, obs: np.ndarray):
     """Try to extract the action probability vector from an SB3 policy for a single observation.
 
@@ -187,7 +204,6 @@ def run_episode(env: ConvActiveExplorerEnv, policy, render: bool = False, determ
         moves += 1
         if render:
             env.render(mode='cv2')
-            time.sleep(0.02)
         if moves > env.max_steps + 10:
             break
 
@@ -204,7 +220,10 @@ def run_episode(env: ConvActiveExplorerEnv, policy, render: bool = False, determ
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--saved-path', type=str, required=True)
+    parser.add_argument('--saved-path', type=str, required=False,
+                        help='Path to saved SB3 .zip (required for --policy-choice trained)')
+    parser.add_argument('--policy-choice', type=str, choices=['trained', 'random', 'flood'], default='trained',
+                        help='Which policy to evaluate: trained SB3 policy, random, or flood')
     parser.add_argument('--classifier', type=str, default='../active_explorer_mnist/mnist_cnn.pth')
     parser.add_argument('--threshold', type=float, default=0.9)
     parser.add_argument('--num-episodes', type=int, default=100)
@@ -217,19 +236,24 @@ def main():
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
 
-    if args.saved_path is None or not os.path.exists(args.saved_path):
-        raise FileNotFoundError('--saved-path must point to an existing SB3 .zip file')
-
     env = ConvActiveExplorerEnv(classifier_path=args.classifier, confidence_threshold=args.threshold, seed=args.seed)
 
-    if PPO is None:
-        raise RuntimeError('stable-baselines3 not available; install it to use a saved policy')
-
-    try:
-        policy = PPO.load(args.saved_path)
-    except Exception as e:
-        print('PPO.load failed, falling back to PyTorch state dict loader:', type(e).__name__, e)
-        policy = load_policy_fallback(args.saved_path, env)
+    # construct policy object depending on choice
+    policy = None
+    if args.policy_choice == 'trained':
+        if args.saved_path is None or not os.path.exists(args.saved_path):
+            raise FileNotFoundError('--saved-path must point to an existing SB3 .zip file for trained policy')
+        if PPO is None:
+            raise RuntimeError('stable-baselines3 not available; install it to use a saved policy')
+        try:
+            policy = PPO.load(args.saved_path)
+        except Exception as e:
+            print('PPO.load failed, falling back to PyTorch state dict loader:', type(e).__name__, e)
+            policy = load_policy_fallback(args.saved_path, env)
+    elif args.policy_choice == 'random':
+        policy = RandomPolicyConv(env.action_space)
+    elif args.policy_choice == 'flood':
+        policy = FloodPolicyConv(env)
 
     os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
     with open(args.output, 'w', newline='') as csvfile:

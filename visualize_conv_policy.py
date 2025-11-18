@@ -93,10 +93,8 @@ def run_visualization(env: ConvActiveExplorerEnv, policy, episodes: int = 20, re
             action, _ = policy.predict(obs, deterministic=deterministic)
             obs, rew, terminated, truncated, info = env.step(int(action))
             env.render(mode='cv2')
-            # small delay so humans can see frames
-            time.sleep(render_delay)
-        # short pause between episodes
-        time.sleep(0.5)
+            # no deliberate delays; render as fast as possible
+            pass
     # cleanup windows
     cv2.destroyAllWindows()
 
@@ -108,6 +106,8 @@ def main():
     parser.add_argument('--episodes', type=int, default=20)
     parser.add_argument('--mode', type=str, choices=['deterministic', 'stochastic'], default='deterministic',
                         help='Run visualization deterministically or stochastically')
+    parser.add_argument('--policy-choice', type=str, choices=['trained', 'random', 'flood'], default='trained',
+                        help='Which policy to visualize: trained SB3 policy, random, or flood')
     parser.add_argument('--threshold', type=float, default=0.9)
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
@@ -133,7 +133,53 @@ def main():
         raise RuntimeError('stable-baselines3 is not available in this environment')
 
     deterministic_flag = True if args.mode == 'deterministic' else False
-    run_visualization(env, policy, episodes=args.episodes, deterministic=deterministic_flag)
+
+    # support random and flood policies for quick visualization
+    if args.policy_choice == 'random':
+        class RandomPolicyConv:
+            def __init__(self, action_space):
+                self.action_space = action_space
+
+            def predict(self, obs, deterministic: bool = True):
+                return int(np.random.choice(self.action_space.n)), None
+
+        policy_to_use = RandomPolicyConv(env.action_space)
+    elif args.policy_choice == 'flood':
+        def _allowed_actions_from_conv_obs(env: ConvActiveExplorerEnv, obs: np.ndarray):
+            mask = obs[0]
+            loc = obs[2]
+            ys, xs = np.where(loc >= 0.5)
+            if len(ys) == 0:
+                r, c = env.img_h // 2, env.img_w // 2
+            else:
+                r, c = int(ys[0]), int(xs[0])
+            neighbors = []
+            if r - 1 >= 0:
+                neighbors.append((0, r - 1, c))
+            if r + 1 < env.img_h:
+                neighbors.append((1, r + 1, c))
+            if c - 1 >= 0:
+                neighbors.append((2, r, c - 1))
+            if c + 1 < env.img_w:
+                neighbors.append((3, r, c + 1))
+            unexplored = [a for (a, nr, nc) in neighbors if mask[nr, nc] < 0.5]
+            if len(unexplored) > 0:
+                return [int(a) for a in unexplored]
+            return [int(a) for (a, _, _) in neighbors]
+
+        class FloodPolicyConv:
+            def __init__(self, env: ConvActiveExplorerEnv):
+                self.env = env
+
+            def predict(self, obs, deterministic: bool = True):
+                allowed = _allowed_actions_from_conv_obs(self.env, obs)
+                return int(np.random.choice(allowed)), None
+
+        policy_to_use = FloodPolicyConv(env)
+    else:
+        policy_to_use = policy
+
+    run_visualization(env, policy_to_use, episodes=args.episodes, deterministic=deterministic_flag)
 
 
 if __name__ == '__main__':
